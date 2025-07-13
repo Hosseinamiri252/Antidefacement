@@ -7,7 +7,7 @@ from rich.console import Console
 from permission_monitoring import PermissionMonitor  # ماژول آماده
 from ssh import FileOperationsMonitor                # ماژول آماده
 from rsync import RsyncBackup                        # اگر ماژول rsync داری
-from redis import RedisConfig                        # ماژول آماده
+from custum-redis import RedisConfig                        # ماژول آماده
 
 console = Console()
 
