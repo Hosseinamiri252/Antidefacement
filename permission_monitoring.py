@@ -55,25 +55,214 @@ class PermissionMonitor:
         self._setup_database()
 
     def _setup_ssh(self):
+        """Enhanced SSH setup with comprehensive authentication handling"""
         try:
             self.ssh_client = paramiko.SSHClient()
             self.ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
             
+            self.console.print(f"[cyan]Attempting to connect to {self.ssh_config.host}:{self.ssh_config.port}[/cyan]")
+            self.console.print(f"[cyan]Username: {self.ssh_config.username}[/cyan]")
+            
+            # Debug: Show what authentication info we have
+            has_password = bool(self.ssh_config.password)
+            has_key = bool(self.ssh_config.key_path)
+            self.console.print(f"[cyan]Has password: {has_password}, Has key path: {has_key}[/cyan]")
+            
             connect_kwargs = {
                 'hostname': self.ssh_config.host,
                 'port': self.ssh_config.port,
-                'username': self.ssh_config.username
+                'username': self.ssh_config.username,
+                'timeout': 30,  # Increase timeout
+                'allow_agent': True,
+                'look_for_keys': True,
+                'banner_timeout': 30,
+                'auth_timeout': 30,
             }
             
-            if self.ssh_config.password:
-                connect_kwargs['password'] = self.ssh_config.password
-            if self.ssh_config.key_path:
-                connect_kwargs['key_filename'] = os.path.expanduser(self.ssh_config.key_path)
+            auth_success = False
+            
+            # Method 1: Try with provided password first
+            if self.ssh_config.password and not auth_success:
+                try:
+                    self.console.print("[yellow]Trying password authentication...[/yellow]")
+                    temp_kwargs = connect_kwargs.copy()
+                    temp_kwargs['password'] = self.ssh_config.password
+                    temp_kwargs['look_for_keys'] = False  # Disable key lookup for password auth
+                    temp_kwargs['allow_agent'] = False   # Disable agent for password auth
+                    
+                    self.ssh_client.connect(**temp_kwargs)
+                    auth_success = True
+                    self.console.print("[green]✓ Password authentication successful[/green]")
+                except paramiko.AuthenticationException as e:
+                    self.console.print(f"[red]✗ Password authentication failed: {str(e)}[/red]")
+                except Exception as e:
+                    self.console.print(f"[red]✗ Password authentication error: {str(e)}[/red]")
+            
+            # Method 2: Try with provided key file
+            if self.ssh_config.key_path and not auth_success:
+                try:
+                    key_path = os.path.expanduser(self.ssh_config.key_path)
+                    self.console.print(f"[yellow]Trying key file authentication: {key_path}[/yellow]")
+                    
+                    if os.path.exists(key_path):
+                        # Check key file permissions
+                        key_stat = os.stat(key_path)
+                        key_perms = oct(key_stat.st_mode)[-3:]
+                        self.console.print(f"[cyan]Key file permissions: {key_perms}[/cyan]")
+                        
+                        temp_kwargs = connect_kwargs.copy()
+                        temp_kwargs['key_filename'] = key_path
+                        temp_kwargs['look_for_keys'] = False
+                        temp_kwargs['allow_agent'] = False
+                        
+                        self.ssh_client.connect(**temp_kwargs)
+                        auth_success = True
+                        self.console.print("[green]✓ Key file authentication successful[/green]")
+                    else:
+                        self.console.print(f"[red]✗ Key file not found: {key_path}[/red]")
+                except paramiko.AuthenticationException as e:
+                    self.console.print(f"[red]✗ Key file authentication failed: {str(e)}[/red]")
+                except Exception as e:
+                    self.console.print(f"[red]✗ Key file authentication error: {str(e)}[/red]")
+            
+            # Method 3: Try SSH agent and default keys
+            # Method 5: Interactive password prompt
+            if not auth_success:
+                self.console.print("[bold yellow]All automatic authentication methods failed![/bold yellow]")
+                self.console.print("[yellow]Attempting interactive authentication...[/yellow]")
 
-            self.ssh_client.connect(**connect_kwargs)
-            self.sftp_client = self.ssh_client.open_sftp()
+                for attempt in range(3):
+                    try:
+                        password = getpass.getpass(
+                            f"Password for {self.ssh_config.username}@{self.ssh_config.host} (attempt {attempt + 1}/3): "
+                        )
+                        if not password.strip():
+                            self.console.print("[yellow]Empty password entered, skipping...[/yellow]")
+                            continue
+
+                        temp_kwargs = connect_kwargs.copy()
+                        temp_kwargs['password'] = password
+                        temp_kwargs['look_for_keys'] = False
+                        temp_kwargs['allow_agent'] = False
+
+                        self.ssh_client.connect(**temp_kwargs)
+                        auth_success = True
+                        self.console.print("[green]✓ Manual password authentication successful[/green]")
+
+            # ذخیره پسورد برای استفاده بعدی
+                        self.ssh_config.password = password
+                        break
+
+                    except paramiko.AuthenticationException:
+                        self.console.print(f"[red]✗ Manual password failed (attempt {attempt + 1}/3)[/red]")
+                    except Exception as e:
+                        self.console.print(f"[red]✗ Manual password error: {str(e)}[/red]")
+
+            if not auth_success:
+                self.console.print("[bold red]All authentication methods exhausted![/bold red]")
+                self.console.print("[yellow]Please check:")
+                self.console.print(" 1. Username is correct")
+                self.console.print(" 2. Password is correct")
+                self.console.print(" 3. SSH keys exist and have proper permissions (600)")
+                self.console.print(" 4. SSH server allows your auth method")
+                self.console.print(f" 5. Try manually: ssh {self.ssh_config.username}@{self.ssh_config.host}")
+                raise paramiko.AuthenticationException("All authentication methods failed")
+                
+                for key_path in default_keys:
+                    expanded_path = os.path.expanduser(key_path)
+                    if os.path.exists(expanded_path):
+                        try:
+                            self.console.print(f"[yellow]Trying default key: {expanded_path}[/yellow]")
+                            temp_kwargs = connect_kwargs.copy()
+                            temp_kwargs['key_filename'] = expanded_path
+                            temp_kwargs['look_for_keys'] = False
+                            temp_kwargs['allow_agent'] = False
+                            
+                            self.ssh_client.connect(**temp_kwargs)
+                            auth_success = True
+                            self.console.print(f"[green]✓ Default key successful: {expanded_path}[/green]")
+                            break
+                        except paramiko.AuthenticationException:
+                            self.console.print(f"[red]✗ Default key failed: {expanded_path}[/red]")
+                        except Exception as e:
+                            self.console.print(f"[red]✗ Default key error: {expanded_path} - {str(e)}[/red]")
+            
+            # Method 5: Interactive password prompt
+            if not auth_success:
+                self.console.print("[bold yellow]All automatic authentication methods failed![/bold yellow]")
+                self.console.print("[yellow]Attempting interactive authentication...[/yellow]")
+                
+                # First, let's try to see what auth methods are available
+                try:
+                    transport = paramiko.Transport((self.ssh_config.host, self.ssh_config.port))
+                    transport.connect()
+                    auth_methods = transport.auth_none(self.ssh_config.username)
+                    self.console.print(f"[cyan]Available authentication methods: {auth_methods}[/cyan]")
+                    transport.close()
+                except Exception as e:
+                    self.console.print(f"[yellow]Could not determine auth methods: {str(e)}[/yellow]")
+                
+                # Try manual password entry
+                for attempt in range(3):
+                    try:
+                        password = getpass.getpass(f"Password for {self.ssh_config.username}@{self.ssh_config.host} (attempt {attempt + 1}/3): ")
+                        if not password.strip():
+                            self.console.print("[yellow]Empty password entered, skipping...[/yellow]")
+                            continue
+                        
+                        temp_kwargs = connect_kwargs.copy()
+                        temp_kwargs['password'] = password
+                        temp_kwargs['look_for_keys'] = False
+                        temp_kwargs['allow_agent'] = False
+                        
+                        self.ssh_client.connect(**temp_kwargs)
+                        auth_success = True
+                        self.console.print("[green]✓ Manual password authentication successful[/green]")
+                        break
+                    except paramiko.AuthenticationException:
+                        self.console.print(f"[red]✗ Manual password failed (attempt {attempt + 1}/3)[/red]")
+                    except Exception as e:
+                        self.console.print(f"[red]✗ Manual password error: {str(e)}[/red]")
+            
+            if not auth_success:
+                self.console.print("[bold red]All authentication methods exhausted![/bold red]")
+                self.console.print("[yellow]Please check:[/yellow]")
+                self.console.print("[yellow]1. Username is correct[/yellow]")
+                self.console.print("[yellow]2. Password is correct[/yellow]")
+                self.console.print("[yellow]3. SSH key exists and has proper permissions (600)[/yellow]")
+                self.console.print("[yellow]4. SSH server allows your authentication method[/yellow]")
+                self.console.print("[yellow]5. Try connecting manually with: ssh {}@{}[/yellow]".format(
+                    self.ssh_config.username, self.ssh_config.host))
+                raise paramiko.AuthenticationException("All authentication methods failed")
+            
+            # Test the connection
+            self.console.print("[cyan]Testing SSH connection...[/cyan]")
+            try:
+                stdin, stdout, stderr = self.ssh_client.exec_command('echo "SSH connection test"', timeout=10)
+                result = stdout.read().decode().strip()
+                error = stderr.read().decode().strip()
+                
+                if result == "SSH connection test":
+                    self.console.print("[green]✓ SSH connection test successful[/green]")
+                else:
+                    self.console.print(f"[yellow]⚠ SSH test unexpected result: {result}[/yellow]")
+                    if error:
+                        self.console.print(f"[yellow]SSH test error: {error}[/yellow]")
+            except Exception as e:
+                self.console.print(f"[yellow]⚠ SSH test command failed: {str(e)}[/yellow]")
+            
+            # Setup SFTP
+            try:
+                self.sftp_client = self.ssh_client.open_sftp()
+                self.console.print("[green]✓ SFTP client established[/green]")
+            except Exception as e:
+                self.console.print(f"[red]✗ SFTP setup failed: {str(e)}[/red]")
+                raise
+                
         except Exception as e:
             self.console.print(f"[red]SSH connection failed: {str(e)}[/red]")
+            if hasattr(self, 'ssh_client'):
+                self.ssh_client.close()
             raise
 
     def _setup_database(self):
@@ -318,34 +507,55 @@ class PermissionMonitor:
             self.console.print(f"[yellow]Problematic change data: {json.dumps(change, default=str)}[/yellow]")
 
     def start(self):
-        self.console.print(f"[green][+] Started monitoring permissions on {self.config.path}[/green]")
-        self.console.print(f"[green][+] Connected to {self.ssh_config.host}[/green]")
+        """Start the permission monitoring process"""
+        self.console.print("[green]Starting permission monitoring...[/green]")
         
-        last_state = {}
+        # Get initial state
+        old_state = self._get_permission_state()
+        self.console.print(f"[cyan]Initial state captured: {len(old_state)} items[/cyan]")
+        
+        # Start the database writer thread
+        db_thread = threading.Thread(target=self._database_writer, daemon=True)
+        db_thread.start()
         
         try:
             while not self.stop_event.is_set():
-                try:
-                    current_state = self._get_permission_state()
-                    self._detect_permission_changes(last_state, current_state)
-                    
-                    # Process any changes in the queue
-                    while not self.changes_queue.empty():
-                        change = self.changes_queue.get_nowait()
-                        self._save_change(change)
-                        self._log_change(change)
-                    
-                    last_state = current_state
-                    time.sleep(self.config.interval)
-                    
-                except Exception as e:
-                    self.console.print(f"[red]Error in monitoring loop: {e}[/red]")
-                    time.sleep(5)
-                    
+                time.sleep(self.config.interval)
+                
+                # Get current state
+                new_state = self._get_permission_state()
+                
+                # Detect changes
+                self._detect_permission_changes(old_state, new_state)
+                
+                # Update state
+                old_state = new_state
+                
         except KeyboardInterrupt:
-            self.console.print("\n[yellow][+] Received keyboard interrupt[/yellow]")
+            self.console.print("\n[yellow]Stopping monitoring...[/yellow]")
         finally:
             self.stop()
+
+    def _database_writer(self):
+       while not self.stop_event.is_set():
+            try:
+                change = self.changes_queue.get(timeout=1)
+                self._log_change(change)
+                self._save_change(change)
+            
+                # ✅ اضافه کردن ارسال به Redis
+                if hasattr(self, 'redis') and self.redis:
+                    self.redis.add_to_queue("perm_changes", change)
+
+            except queue.Empty:
+                continue
+            except Exception as e:
+                self.console.print(f"[red]Database writer error: {str(e)}[/red]")
+           
+            except queue.Empty:
+                continue
+            except Exception as e:
+                self.console.print(f"[red]Database writer error: {str(e)}[/red]")
 
     def stop(self):
         self.stop_event.set()
@@ -463,4 +673,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
